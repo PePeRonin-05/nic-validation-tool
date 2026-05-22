@@ -34,7 +34,7 @@
 ## Структура проекта
 
 ```
-.
+nic-validation-tool/
 ├── run.sh
 ├── inventory/
 │   └── group_vars/all.yml   ← настройки (пароль, MTU, пороги)
