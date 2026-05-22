@@ -1,0 +1,4 @@
+log_subdirs:
+  - rdma
+  - iface_status
+  - pci_logs

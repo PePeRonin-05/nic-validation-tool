@@ -1,0 +1,83 @@
+---
+- name: Setup
+  hosts: nic_all
+  become: yes
+  gather_facts: no
+  vars:
+    log_subdirs:
+      - iperf
+      - rdma
+      - iface_status
+      - pci_logs
+  roles:
+    - common
+    - role: diagnostics
+      vars: { diag_phase: pre }
+
+- name: iperf3 Test
+  hosts: nic_all
+  become: yes
+  gather_facts: no
+  tasks:
+    - block:
+        - include_role:
+            name: iperf_loopback
+      rescue:
+        - name: iperf3 failed — emergency cleanup
+          include_role:
+            name: cleanup
+
+- name: RDMA Test
+  hosts: nic_all
+  become: yes
+  gather_facts: no
+  tasks:
+    - block:
+        - include_role:
+            name: rdma_loopback
+      rescue:
+        - name: RDMA failed — emergency cleanup
+          include_role:
+            name: cleanup
+
+- name: Finalize
+  hosts: nic_all
+  become: yes
+  gather_facts: no
+  tasks:
+    - include_role:
+        name: diagnostics
+      vars: { diag_phase: post }
+
+    - block:
+        - include_role:
+            name: parse_results
+          vars: { test_type: loopback }
+      rescue:
+        - name: Record iperf3 threshold failure
+          set_fact:
+            _threshold_failed: true
+        - debug:
+            msg: "⚠️  iperf3 results below threshold — collecting logs before failing"
+
+    - block:
+        - include_role:
+            name: parse_results
+          vars: { test_type: rdma_loopback }
+      rescue:
+        - name: Record RDMA threshold failure
+          set_fact:
+            _threshold_failed: true
+        - debug:
+            msg: "⚠️  RDMA results below threshold — collecting logs before failing"
+
+    - include_role:
+        name: collect_logs
+
+    - include_role:
+        name: cleanup
+
+    - name: Fail if thresholds were not met
+      fail:
+        msg: "❌ Bandwidth did not meet minimum thresholds"
+      when: _threshold_failed | default(false)

@@ -1,0 +1,33 @@
+---
+- name: Archive remote logs
+  archive:
+    path: "{{ remote_log_dir }}"
+    dest: "/tmp/{{ inventory_hostname }}_nic_logs.tar.gz"
+    mode: "0644"
+
+- name: Ensure local destination directory
+  file:
+    path: "{{ local_log_dir }}/{{ log_subdir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+
+- name: Fetch logs to control node
+  fetch:
+    src: "/tmp/{{ inventory_hostname }}_nic_logs.tar.gz"
+    dest: "{{ local_log_dir }}/{{ log_subdir }}/"
+    flat: yes
+    fail_on_missing: yes
+
+- name: Remove remote archive
+  file:
+    path: "/tmp/{{ inventory_hostname }}_nic_logs.tar.gz"
+    state: absent
+  ignore_errors: true
+
+- name: Remove remote log directory
+  file:
+    path: "{{ remote_log_dir }}"
+    state: absent
+  ignore_errors: true

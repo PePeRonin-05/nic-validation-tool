@@ -1,0 +1,23 @@
+---
+- name: Stop all iperf3 processes
+  command: pkill iperf3
+  register: _pkill_iperf3
+  failed_when: _pkill_iperf3.rc not in [0, 1]
+  changed_when: false
+
+- name: Stop all perftest processes
+  command: pkill -f 'ib_read_bw|ib_write_bw'
+  register: _pkill_perftest
+  failed_when: _pkill_perftest.rc not in [0, 1]
+  changed_when: false
+
+- name: Flush test IPs from interfaces
+  command: ip addr flush dev {{ item }}
+  loop: "{{ diag_ifaces }}"
+  ignore_errors: true
+
+- name: Flush ARP entries from interfaces
+  command: ip neigh flush dev {{ item }}
+  loop: "{{ diag_ifaces }}"
+  ignore_errors: true
+

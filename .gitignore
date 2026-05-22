@@ -1,0 +1,3 @@
+local_logs/
+*.retry
+.claude/

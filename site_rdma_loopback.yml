@@ -1,0 +1,52 @@
+---
+- name: Setup
+  hosts: rdma_loopback
+  become: yes
+  gather_facts: no
+  roles:
+    - common
+    - role: diagnostics
+      vars: { diag_phase: pre }
+
+- name: Test
+  hosts: rdma_loopback
+  become: yes
+  gather_facts: no
+  tasks:
+    - block:
+        - include_role:
+            name: rdma_loopback
+      rescue:
+        - name: Test failed — running emergency cleanup
+          include_role:
+            name: cleanup
+
+- name: Finalize
+  hosts: rdma_loopback
+  become: yes
+  gather_facts: no
+  tasks:
+    - include_role:
+        name: diagnostics
+      vars: { diag_phase: post }
+
+    - block:
+        - include_role:
+            name: parse_results
+      rescue:
+        - name: Record threshold failure
+          set_fact:
+            _threshold_failed: true
+        - debug:
+            msg: "⚠️  Results below threshold — collecting logs before failing"
+
+    - include_role:
+        name: collect_logs
+
+    - include_role:
+        name: cleanup
+
+    - name: Fail if thresholds were not met
+      fail:
+        msg: "❌ RDMA bandwidth did not meet minimum thresholds"
+      when: _threshold_failed | default(false)

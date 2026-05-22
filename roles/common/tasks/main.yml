@@ -1,0 +1,94 @@
+---
+- name: Install iperf3
+  package:
+    name: iperf3
+    state: present
+  when: test_type in ['loopback', 'all']
+
+- name: Create log directories
+  file:
+    path: "{{ remote_log_dir }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ log_subdirs }}"
+
+# ── loopback / rdma_loopback / all ───────────────────────────────────────────
+- when: test_type in ['loopback', 'rdma_loopback', 'all']
+  block:
+    - name: Build pair_map
+      set_fact:
+        pair_map: >-
+          {{ pair_map | default([]) + [{
+            'server_port': loopback_pairs[idx].server_port,
+            'client_port': loopback_pairs[idx].client_port,
+            'server_ip':   ipv4_net ~ '.' ~ (idx+1)|string ~ '.' ~ ipv4_server_octet|string,
+            'client_ip':   ipv4_net ~ '.' ~ (idx+1)|string ~ '.' ~ ipv4_client_octet|string,
+            'idx': idx
+          }] }}
+      loop: "{{ range(loopback_pairs | length) | list }}"
+      loop_control:
+        loop_var: idx
+
+    - name: Set diag_ifaces
+      set_fact:
+        diag_ifaces: >-
+          {{ loopback_pairs | map(attribute='server_port') | list +
+             loopback_pairs | map(attribute='client_port') | list }}
+
+    # diag_ifaces order: [server_port_0, server_port_1, ..., client_port_0, client_port_1, ...]
+    # rdma_loopback role depends on this order to map RDMA devices to pairs.
+    - name: Cycle loopback interfaces down/up to trigger link-local generation
+      shell: |
+        ip link set {{ item }} down
+        ip link set {{ item }} up
+      loop: "{{ diag_ifaces }}"
+      changed_when: false
+
+    - name: Wait for interfaces to come UP
+      shell: |
+        for i in $(seq 1 15); do
+          ip link show {{ item }} | grep -q 'state UP' && exit 0
+          sleep 1
+        done
+        echo "Interface {{ item }} did not come up after 15s" >&2
+        exit 1
+      loop: "{{ diag_ifaces }}"
+      changed_when: false
+
+    - name: Set MTU {{ test_mtu }} on loopback interfaces
+      command: ip link set dev {{ item }} mtu {{ test_mtu }}
+      loop: "{{ diag_ifaces }}"
+      changed_when: false
+
+    - name: Flush existing IPs on loopback interfaces (preserve link-local)
+      shell: |
+        ip -4 addr flush dev {{ item }} 2>/dev/null || true
+        ip -6 addr flush dev {{ item }} scope global 2>/dev/null || true
+      loop: "{{ diag_ifaces }}"
+      changed_when: false
+
+    - name: Assign IPv4 to server ports
+      command: ip addr add {{ item.server_ip }}/24 dev {{ item.server_port }}
+      loop: "{{ pair_map }}"
+      loop_control:
+        label: "{{ item.server_port }} → {{ item.server_ip }}/24"
+      changed_when: false
+
+    - name: Assign IPv4 to client ports
+      command: ip addr add {{ item.client_ip }}/24 dev {{ item.client_port }}
+      loop: "{{ pair_map }}"
+      loop_control:
+        label: "{{ item.client_port }} → {{ item.client_ip }}/24"
+      changed_when: false
+
+    - name: Add static ARP entries (required for RoCE QP path resolution)
+      shell: |
+        CLIENT_MAC=$(ip link show {{ item.client_port }} | awk '/link\/ether/{print $2}')
+        SERVER_MAC=$(ip link show {{ item.server_port }} | awk '/link\/ether/{print $2}')
+        ip neigh replace {{ item.client_ip }} lladdr ${CLIENT_MAC} dev {{ item.server_port }} nud permanent
+        ip neigh replace {{ item.server_ip }} lladdr ${SERVER_MAC} dev {{ item.client_port }} nud permanent
+      loop: "{{ pair_map }}"
+      when: test_type in ['rdma_loopback', 'all']
+      changed_when: false
+      loop_control:
+        label: "{{ item.server_port }} ↔ {{ item.client_port }}"

@@ -1,0 +1,81 @@
+---
+- name: "[1/5] Cleanup — kill leftover iperf3 processes"
+  command: pkill iperf3
+  register: _pkill_iperf3
+  failed_when: _pkill_iperf3.rc not in [0, 1]
+  changed_when: false
+
+- name: "[2/5] Discover link-local IPv6 address of server ports"
+  shell: |
+    ip -6 addr show dev {{ item.server_port }} scope link \
+      | awk '/inet6/{print $2}' | cut -d'/' -f1
+  loop: "{{ pair_map }}"
+  register: ll_discovery
+  until: ll_discovery.rc == 0 and ll_discovery.stdout != ''
+  retries: 10
+  delay: 1
+  changed_when: false
+  loop_control:
+    label: "{{ item.server_port }}"
+
+- name: "[3/5] Build interface pair map with link-local addresses"
+  set_fact:
+    ll_pair_map: >-
+      {{ ll_pair_map | default([]) + [{
+        'server_port': pair_map[idx].server_port,
+        'client_port': pair_map[idx].client_port,
+        'server_ll':   ll_discovery.results[idx].stdout | trim,
+        'idx':         pair_map[idx].idx
+      }] }}
+  loop: "{{ range(pair_map | length) | list }}"
+  loop_control:
+    loop_var: idx
+
+- name: "[4/5] Start iperf3 servers"
+  async: "{{ iperf_time | int + 120 }}"
+  poll: 0
+  shell: >
+    iperf3 -s {{ item.server_ll }}%{{ item.server_port }}
+    -p {{ iperf_port_base + item.idx }}
+    --logfile {{ remote_log_dir }}/iperf/server_{{ item.server_port }}.txt
+  loop: "{{ ll_pair_map }}"
+  loop_control:
+    label: "{{ item.server_port }}  {{ item.server_ll }}%{{ item.server_port }}:{{ iperf_port_base + item.idx }}"
+  register: srv_jobs
+
+- name: "[4/5] Wait 2s for servers to be ready"
+  pause:
+    seconds: 2
+
+- name: "[4/5] Start iperf3 clients (bidirectional, {{ iperf_parallel }} streams)"
+  async: "{{ iperf_time | int + 120 }}"
+  poll: 0
+  shell: >
+    iperf3 -c {{ item.server_ll }}%{{ item.client_port }}
+    -p {{ iperf_port_base + item.idx }}
+    -t {{ iperf_time }}
+    -P {{ iperf_parallel }}
+    --bidir
+    --logfile {{ remote_log_dir }}/iperf/client_{{ item.client_port }}.txt
+  loop: "{{ ll_pair_map }}"
+  loop_control:
+    label: "{{ item.client_port }} → {{ item.server_ll }}%{{ item.client_port }}  {{ iperf_parallel }} streams bidir"
+  register: cli_jobs
+
+- name: "[4/5] Running test — {{ iperf_time }}s ({{ (iperf_time | int / 3600) | round(1) }}h)"
+  wait_for:
+    timeout: "{{ iperf_time | int }}"
+  delegate_to: localhost
+  become: false
+
+- name: "[5/5] Verify iperf3 client jobs completed"
+  async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ cli_jobs.results }}"
+  register: cli_status
+  until: cli_status.finished
+  retries: 12
+  delay: 10
+  failed_when: not cli_status.finished
+  loop_control:
+    label: "{{ item.item.client_port }}"

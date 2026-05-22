@@ -1,0 +1,87 @@
+---
+# ── iperf3 ────────────────────────────────────────────────────────────────────
+- name: Parse iperf3 bandwidth from client log
+  shell: |
+    for f in {{ remote_log_dir }}/iperf/client_*.txt; do
+      grep 'sender' "$f" | tail -1
+    done | awk '{for(i=1;i<=NF;i++) if($i~/^Gbits/){sum+=$(i-1)}} END{print sum+0}'
+  register: _iperf_bw
+  when: test_type == 'loopback'
+  changed_when: false
+  failed_when: false
+
+- name: Set iperf3 result facts
+  set_fact:
+    _iperf_gbps: "{{ ((_iperf_bw.stdout | trim) or '0') | float | round(2) }}"
+    _iperf_ok:   "{{ (((_iperf_bw.stdout | trim) or '0') | float) >= (thresholds.iperf_min_gbps | float) }}"
+  when: test_type == 'loopback'
+
+# ── RDMA ──────────────────────────────────────────────────────────────────────
+- name: Parse RDMA read bandwidth from client log
+  shell: |
+    for f in {{ remote_log_dir }}/rdma/rdma_read_client_*.txt; do
+      grep -E '^ +[0-9]' "$f" | tail -1
+    done | awk '{sum+=$(NF-1)} END{print sum+0}'
+  register: _rdma_read_bw
+  when: test_type == 'rdma_loopback'
+  changed_when: false
+  failed_when: false
+
+- name: Parse RDMA write bandwidth from client log
+  shell: |
+    for f in {{ remote_log_dir }}/rdma/rdma_write_client_*.txt; do
+      grep -E '^ +[0-9]' "$f" | tail -1
+    done | awk '{sum+=$(NF-1)} END{print sum+0}'
+  register: _rdma_write_bw
+  when: test_type == 'rdma_loopback'
+  changed_when: false
+  failed_when: false
+
+- name: Set RDMA result facts
+  set_fact:
+    _rdma_read_gbps:  "{{ (((_rdma_read_bw.stdout  | trim) or '0') | float) | round(2) }}"
+    _rdma_write_gbps: "{{ (((_rdma_write_bw.stdout | trim) or '0') | float) | round(2) }}"
+    _rdma_read_ok:    "{{ ((((_rdma_read_bw.stdout  | trim) or '0') | float) >= (thresholds.rdma_read_min_gbps  | float)) }}"
+    _rdma_write_ok:   "{{ ((((_rdma_write_bw.stdout | trim) or '0') | float) >= (thresholds.rdma_write_min_gbps | float)) }}"
+  when: test_type == 'rdma_loopback'
+
+# ── Result box ────────────────────────────────────────────────────────────────
+- name: Print iperf3 PASS/FAIL result
+  debug:
+    msg:
+      - "╔══════════════════════════════════════════╗"
+      - "║           РЕЗУЛЬТАТЫ ТЕСТА               ║"
+      - "╠══════════════════════════════════════════╣"
+      - "║  iperf3:  {{ _iperf_gbps }} Gbps   {{ '✅ PASS' if _iperf_ok else '❌ FAIL' }}"
+      - "╚══════════════════════════════════════════╝"
+  when: test_type == 'loopback'
+
+- name: Print RDMA PASS/FAIL result
+  debug:
+    msg:
+      - "╔══════════════════════════════════════════╗"
+      - "║           РЕЗУЛЬТАТЫ ТЕСТА               ║"
+      - "╠══════════════════════════════════════════╣"
+      - "║  RDMA Read:   {{ _rdma_read_gbps }} Gbps   {{ '✅ PASS' if _rdma_read_ok else '❌ FAIL' }}"
+      - "║  RDMA Write:  {{ _rdma_write_gbps }} Gbps   {{ '✅ PASS' if _rdma_write_ok else '❌ FAIL' }}"
+      - "╚══════════════════════════════════════════╝"
+  when: test_type == 'rdma_loopback'
+
+# ── Threshold assertions ──────────────────────────────────────────────────────
+- name: Assert iperf3 bandwidth meets threshold
+  assert:
+    that: "{{ _iperf_ok }}"
+    fail_msg: "❌ iperf3 {{ _iperf_gbps }} Gbps is below minimum {{ thresholds.iperf_min_gbps }} Gbps"
+  when: test_type == 'loopback'
+
+- name: Assert RDMA read bandwidth meets threshold
+  assert:
+    that: "{{ _rdma_read_ok }}"
+    fail_msg: "❌ RDMA Read {{ _rdma_read_gbps }} Gbps is below minimum {{ thresholds.rdma_read_min_gbps }} Gbps"
+  when: test_type == 'rdma_loopback'
+
+- name: Assert RDMA write bandwidth meets threshold
+  assert:
+    that: "{{ _rdma_write_ok }}"
+    fail_msg: "❌ RDMA Write {{ _rdma_write_gbps }} Gbps is below minimum {{ thresholds.rdma_write_min_gbps }} Gbps"
+  when: test_type == 'rdma_loopback'

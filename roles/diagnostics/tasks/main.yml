@@ -1,0 +1,19 @@
+---
+- name: "{{ diag_phase | upper }} - Save ip link statistics"
+  shell: |
+    {
+      for iface in {{ diag_ifaces | join(' ') }}; do
+        echo "=== $iface ==="
+        ip -s link show dev "$iface"
+        echo ""
+      done
+    } > {{ remote_log_dir }}/iface_status/{{ diag_phase }}_ip_link_stats.txt
+
+- name: "{{ diag_phase | upper }} - Collect PCI/dmesg/journalctl logs per interface"
+  shell: |
+    PCI=$(basename "$(readlink /sys/class/net/{{ item }}/device)")
+    journalctl --no-pager -b | grep "$PCI" \
+      > {{ remote_log_dir }}/pci_logs/{{ diag_phase }}_journalctl_{{ item }}.txt 2>/dev/null || true
+    dmesg | grep "$PCI" \
+      > {{ remote_log_dir }}/pci_logs/{{ diag_phase }}_dmesg_{{ item }}.txt 2>/dev/null || true
+  loop: "{{ diag_ifaces }}"

@@ -1,0 +1,152 @@
+---
+- name: Find MLNX OFED perftest .deb on target host
+  shell: find /root -name 'perftest_*.deb' 2>/dev/null | head -1
+  register: _perftest_deb
+  changed_when: false
+  failed_when: false
+
+- name: Install perftest from MLNX OFED .deb
+  apt:
+    deb: "{{ _perftest_deb.stdout }}"
+    state: present
+  when: _perftest_deb.stdout | length > 0
+
+- name: Install perftest from apt (fallback when MLNX OFED not present)
+  apt:
+    name: perftest
+    state: present
+  when: _perftest_deb.stdout | length == 0
+
+- name: "[1/6] Cleanup — kill leftover perftest processes"
+  command: pkill -f 'ib_read_bw|ib_write_bw'
+  register: _pkill_pre
+  failed_when: _pkill_pre.rc not in [0, 1]
+  changed_when: false
+
+- name: "[2/6] Discover RDMA device and NUMA for each port"
+  shell: |
+    rdma_dev=$(ls /sys/class/net/{{ item }}/device/infiniband/ 2>/dev/null | head -1)
+    numa=$(cat /sys/class/net/{{ item }}/device/numa_node 2>/dev/null || echo 0)
+    echo "${rdma_dev} ${numa}"
+  loop: "{{ diag_ifaces }}"
+  register: rdma_discovery
+  changed_when: false
+
+- name: "[3/6] Build RDMA pair map"
+  set_fact:
+    rdma_pair_map: >-
+      {{ rdma_pair_map | default([]) + [{
+        'server_port':   pair_map[idx].server_port,
+        'client_port':   pair_map[idx].client_port,
+        'server_ip':     pair_map[idx].server_ip,
+        'client_ip':     pair_map[idx].client_ip,
+        'server_rdma':   rdma_discovery.results[idx].stdout.split()[0],
+        'server_numa':   rdma_discovery.results[idx].stdout.split()[1],
+        'client_rdma':   rdma_discovery.results[(pair_map | length) + idx].stdout.split()[0],
+        'client_numa':   rdma_discovery.results[(pair_map | length) + idx].stdout.split()[1],
+        'read_port':     rdma_port_base + idx * 2,
+        'write_port':    rdma_port_base + idx * 2 + 1,
+        'idx':           idx
+      }] }}
+  loop: "{{ range(pair_map | length) | list }}"
+  loop_control:
+    loop_var: idx
+
+# ── Start all servers (async, non-blocking) ───────────────────────────────────
+- name: "[4/6] Start ib_read_bw servers"
+  async: "{{ rdma_duration | int + 60 }}"
+  poll: 0
+  shell: >
+    numactl --cpunodebind={{ item.server_numa }} --membind={{ item.server_numa }}
+    ib_read_bw -s {{ rdma_msg_size }} -q {{ rdma_qp }} -D {{ rdma_duration }}
+    -p {{ item.read_port }} -d {{ item.server_rdma }}
+    --mr_per_qp --report_gbits
+    > {{ remote_log_dir }}/rdma/rdma_read_server_{{ item.server_port }}.txt 2>&1
+  loop: "{{ rdma_pair_map }}"
+  loop_control:
+    label: "{{ item.server_port }} {{ item.server_rdma }}:{{ item.read_port }}"
+
+- name: "[4/6] Start ib_write_bw servers"
+  async: "{{ rdma_duration | int + 60 }}"
+  poll: 0
+  shell: >
+    numactl --cpunodebind={{ item.server_numa }} --membind={{ item.server_numa }}
+    ib_write_bw -s {{ rdma_msg_size }} -q {{ rdma_qp }} -D {{ rdma_duration }}
+    -p {{ item.write_port }} -d {{ item.server_rdma }}
+    --mr_per_qp --report_gbits
+    > {{ remote_log_dir }}/rdma/rdma_write_server_{{ item.server_port }}.txt 2>&1
+  loop: "{{ rdma_pair_map }}"
+  loop_control:
+    label: "{{ item.server_port }} {{ item.server_rdma }}:{{ item.write_port }}"
+
+- name: "[4/6] Wait 2s for servers to be ready"
+  pause:
+    seconds: 2
+
+# ── Start all clients simultaneously (async, non-blocking) ────────────────────
+- name: "[5/6] Start ib_read_bw clients"
+  async: "{{ rdma_duration | int + 60 }}"
+  poll: 0
+  shell: >
+    numactl --cpunodebind={{ item.client_numa }} --membind={{ item.client_numa }}
+    ib_read_bw -s {{ rdma_msg_size }} -q {{ rdma_qp }} -D {{ rdma_duration }}
+    -p {{ item.read_port }} -d {{ item.client_rdma }}
+    --mr_per_qp --report_gbits
+    {{ item.server_ip }}
+    > {{ remote_log_dir }}/rdma/rdma_read_client_{{ item.client_port }}.txt 2>&1
+  loop: "{{ rdma_pair_map }}"
+  loop_control:
+    label: "{{ item.client_port }} → {{ item.server_ip }} read"
+  register: read_cli_jobs
+
+- name: "[5/6] Start ib_write_bw clients"
+  async: "{{ rdma_duration | int + 60 }}"
+  poll: 0
+  shell: >
+    numactl --cpunodebind={{ item.client_numa }} --membind={{ item.client_numa }}
+    ib_write_bw -s {{ rdma_msg_size }} -q {{ rdma_qp }} -D {{ rdma_duration }}
+    -p {{ item.write_port }} -d {{ item.client_rdma }}
+    --mr_per_qp --report_gbits
+    {{ item.server_ip }}
+    > {{ remote_log_dir }}/rdma/rdma_write_client_{{ item.client_port }}.txt 2>&1
+  loop: "{{ rdma_pair_map }}"
+  loop_control:
+    label: "{{ item.client_port }} → {{ item.server_ip }} write"
+  register: write_cli_jobs
+
+# ── Wait and verify ───────────────────────────────────────────────────────────
+- name: "[6/6] Running test — {{ rdma_duration }}s ({{ (rdma_duration | int / 3600) | round(1) }}h)"
+  wait_for:
+    timeout: "{{ rdma_duration | int }}"
+  delegate_to: localhost
+  become: false
+
+- name: "[6/6] Verify ib_read_bw clients completed"
+  async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ read_cli_jobs.results }}"
+  register: read_cli_status
+  until: read_cli_status.finished
+  retries: 12
+  delay: 10
+  failed_when: not read_cli_status.finished
+  loop_control:
+    label: "{{ item.item.client_port }} read"
+
+- name: "[6/6] Verify ib_write_bw clients completed"
+  async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ write_cli_jobs.results }}"
+  register: write_cli_status
+  until: write_cli_status.finished
+  retries: 12
+  delay: 10
+  failed_when: not write_cli_status.finished
+  loop_control:
+    label: "{{ item.item.client_port }} write"
+
+- name: "[6/6] Cleanup — kill leftover perftest servers"
+  command: pkill -f 'ib_read_bw|ib_write_bw'
+  register: _pkill_post
+  failed_when: _pkill_post.rc not in [0, 1]
+  changed_when: false
