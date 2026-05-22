@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ansible iperf_loopback *)",
+      "Bash(ansible-playbook *)",
+      "Bash(tar -xOf local_logs/rdma_loopback/*.tar.gz nic_test_logs/iperf/rdma_read_client_enp241s0f1np1.txt)",
+      "Bash(tar -xOf local_logs/rdma_loopback/*.tar.gz nic_test_logs/iperf/rdma_write_client_enp241s0f1np1.txt)"
+    ]
+  }
+}
